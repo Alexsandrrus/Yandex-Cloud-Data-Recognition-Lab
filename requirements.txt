@@ -1,9 +1,7 @@
-matplotlib
-numpy
-pandas
+pdfplumber 
+pandas 
+tqdm 
+torch 
 transformers 
-layoutparser 
-tqdm
-re 
-pdfplumber
-os
+matplotlib 
+concurrent-log-handler
