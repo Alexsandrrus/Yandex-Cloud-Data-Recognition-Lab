@@ -1,0 +1,9 @@
+matplotlib
+numpy
+pandas
+transformers 
+layoutparser 
+tqdm
+re 
+pdfplumber
+os
