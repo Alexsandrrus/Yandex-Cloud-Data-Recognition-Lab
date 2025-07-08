@@ -1,7 +1,6 @@
-pdfplumber 
 pandas 
 tqdm 
-torch 
-transformers 
+pdfplumber 
 matplotlib 
-concurrent-log-handler
+torch 
+transformers
