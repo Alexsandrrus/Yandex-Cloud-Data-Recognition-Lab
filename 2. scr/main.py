@@ -31,19 +31,20 @@ class ROPProcessor:
         except ImportError:
             logger.warning("Не удалось определить версию transformers")
 
-        # Инициализация NER модели для русского языка
+        # Инициализация NER модели (опционально)
+        self.ner_pipeline = None
         try:
+            # Попробуем альтернативную модель
             self.ner_pipeline = pipeline(
                 "ner",
-                model="DeepPavlov/rubert-base-cased-ner-ontonotes",
+                model="Davlan/bert-base-multilingual-cased-ner-hrl",
                 aggregation_strategy="simple",
-                device=DEVICE,
-                framework="pt"
+                device=DEVICE
             )
             logger.info("Модель для распознавания именованных сущностей (NER) успешно загружена")
         except Exception as e:
-            logger.error(f"Ошибка загрузки NER модели: {e}")
-            raise RuntimeError("Не удалось инициализировать NER модель")
+            logger.warning(f"Не удалось загрузить NER модель: {e}")
+            logger.warning("Продолжаем без NER модели")
 
         # Инициализация модели для анализа структуры документов
         try:
@@ -59,7 +60,8 @@ class ROPProcessor:
             logger.warning(f"Ошибка загрузки LayoutLMv2: {e}")
             self.layout_model = None
 
-        self.cache = {}
+            self.cache = {}
+
     
     def extract_text_from_pdf(self, pdf_path):
         """Извлечение текста из PDF с сохранением структуры"""
@@ -153,15 +155,41 @@ class ROPProcessor:
         return goods_data
     
     def load_rop_reference(self, pdf_path):
-        """Загрузка кодов ТН ВЭД из русскоязычного документа"""
-        text_data = self.extract_text_from_pdf(pdf_path)
-        full_text = " ".join([" ".join([word['text'] for word in page]) for page in text_data])
+        """Улучшенный метод для извлечения кодов ТН ВЭД из PDF"""
+        if not os.path.exists(pdf_path):
+            logger.error(f"Файл с кодами РОП не найден: {pdf_path}")
+            return []
         
-        # Улучшенный поиск кодов ТН ВЭД в русском тексте
-        hs_codes = re.findall(r'(?:код\s*тн\s*вэд\s*|тн\s*вэд\s*)?(\d{4}\s?\d{2}\s?\d{2,4})', full_text, re.IGNORECASE)
-        
-        # Нормализация кодов (удаление пробелов и нецифровых символов)
-        return list(set([re.sub(r'\D', '', code) for code in hs_codes))
+        try:
+            # Извлекаем весь текст из PDF
+            full_text = ""
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    full_text += page.extract_text() + "\n"
+            
+            # Улучшенные шаблоны для поиска кодов ТН ВЭД
+            hs_code_patterns = [
+                r'(?:код\s*ТН\s*ВЭД|ТН\s*ВЭД)\s*(\d{4}\s?\d{2}\s?\d{2,4})',  # С указанием "код ТН ВЭД"
+                r'\b\d{4}\s?\d{2}\s?\d{2,4}\b',  # Просто 10 цифр с возможными пробелами
+                r'(?<!\d)\d{10}(?!\d)',  # Ровно 10 цифр подряд
+            ]
+            
+            found_codes = set()
+            
+            # Ищем по всем шаблонам
+            for pattern in hs_code_patterns:
+                matches = re.finditer(pattern, full_text, re.IGNORECASE)
+                for match in matches:
+                    code = re.sub(r'\D', '', match.group())  # Оставляем только цифры
+                    if len(code) == 10:  # Проверяем что код содержит 10 цифр
+                        found_codes.add(code)
+            
+            logger.info(f"Найдено {len(found_codes)} уникальных кодов ТН ВЭД")
+            return list(found_codes)
+            
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке кодов РОП: {e}")
+            return []
     
     def process_declaration(self, pdf_path, rop_codes):
         """Обработка одной декларации с улучшенным логированием"""
