@@ -34,19 +34,19 @@ class ROPProcessor:
         # Инициализация NER модели (опционально)
         self.ner_pipeline = None
         try:
-            # Попробуем альтернативную модель
             self.ner_pipeline = pipeline(
                 "ner",
                 model="Davlan/bert-base-multilingual-cased-ner-hrl",
                 aggregation_strategy="simple",
-                device=DEVICE
+                device=DEVICE,
+                framework="pt"
             )
-            logger.info("Модель для распознавания именованных сущностей (NER) успешно загружена")
+            logger.info("NER модель успешно загружена")
         except Exception as e:
             logger.warning(f"Не удалось загрузить NER модель: {e}")
-            logger.warning("Продолжаем без NER модели")
 
         # Инициализация модели для анализа структуры документов
+        self.layout_model = None
         try:
             self.processor = LayoutLMv2Processor.from_pretrained(
                 "microsoft/layoutlmv2-base-uncased",
@@ -55,13 +55,11 @@ class ROPProcessor:
             self.layout_model = LayoutLMv2ForTokenClassification.from_pretrained(
                 "microsoft/layoutlmv2-base-uncased"
             ).to(DEVICE)
-            logger.info("Модель для анализа структуры документов успешно загружена")
+            logger.info("Модель для анализа структуры документов загружена")
         except Exception as e:
             logger.warning(f"Ошибка загрузки LayoutLMv2: {e}")
-            self.layout_model = None
 
-            self.cache = {}
-
+        self.cache = {}
     
     def extract_text_from_pdf(self, pdf_path):
         """Извлечение текста из PDF с сохранением структуры"""
@@ -87,147 +85,118 @@ class ROPProcessor:
 
         return text
     
-    def analyze_layout(self, pdf_path):
-        """Анализ структуры документа"""
-        if self.layout_model is None:
-            return None
-
-        try:
-            images = [pdfplumber.open(pdf_path).pages[0].to_image().original]
-            encoded_inputs = self.processor(images, return_tensors="pt").to(DEVICE)
-            outputs = self.layout_model(**encoded_inputs)
-            return outputs
-        except Exception as e:
-            logger.warning(f"Ошибка анализа структуры {pdf_path}: {e}")
-            return None
+    def _extract_value(self, text, pattern):
+        """Извлечение числового значения из текста"""
+        match = re.search(pattern, text)
+        if match:
+            try:
+                return float(match.group(1).replace(',', '.'))
+            except ValueError:
+                return 0.0
+        return 0.0
+    
+    def _extract_good_name(self, text, hs_code):
+        """Извлечение наименования товара"""
+        # Ищем текст между "Описание товаров" и кодом ТН ВЭД
+        match = re.search(r'31\s*Описание товаров\s*(.*?)\d{10}', text, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return f"Товар {hs_code}"
     
     def extract_goods_info(self, pdf_path):
-        """Извлечение информации о товарах из русскоязычных деклараций"""
+        """Извлечение информации о товарах из деклараций"""
         text_data = self.extract_text_from_pdf(pdf_path)
         goods_data = []
-        
-        # Оптимизированные шаблоны для русскоязычных документов
-        patterns = {
-            'name': r'(?:наименование|описание).*?товар.*?\d+.*?([^\n]+?)(?=\d{10}|код|$)', 
-            'hs_code': r'(?:код\s*тн\s*вэд|код\s*товара).*?(\d{6,10})',
-            'quantity': r'(?:количество|кол-во).*?(\d+)\s*(?:шт|штук)',
-            'net_weight': r'(?:вес\s*нетто|нетто).*?(\d+[,.]?\d*)',
-            'gross_weight': r'(?:вес\s*брутто|брутто).*?(\d+[,.]?\d*)'
-        }
         
         for page in text_data:
             page_text = " ".join([word['text'] for word in page])
             
-            # Нормализация текста для улучшения поиска
-            page_text = re.sub(r'\s+', ' ', page_text.lower())
+            # Ищем все коды товаров на странице
+            hs_code_matches = re.finditer(r'33\s*Код товара\s*(\d{10})', page_text)
             
-            # Поиск товарных позиций
-            for match in re.finditer(patterns['name'], page_text, re.IGNORECASE):
-                good_block = match.group()
-                good_info = {}
+            for hs_match in hs_code_matches:
+                hs_code = hs_match.group(1)
+                context = page_text[max(0, hs_match.start()-300):hs_match.end()+300]
                 
-                try:
-                    # Извлечение данных из блока товара
-                    good_info['name'] = re.sub(r'\d+\)', '', match.group(1)).strip()
-                    
-                    # Поиск остальных атрибутов в пределах 200 символов от названия
-                    context = page_text[max(0, match.start()-100):match.end()+100]
-                    
-                    if hs_match := re.search(patterns['hs_code'], context):
-                        good_info['hs_code'] = re.sub(r'\D', '', hs_match.group(1))
-                    
-                    if qty_match := re.search(patterns['quantity'], context):
-                        good_info['quantity'] = int(qty_match.group(1).replace(',', ''))
-                    
-                    if net_match := re.search(patterns['net_weight'], context):
-                        good_info['net_weight'] = float(net_match.group(1).replace(',', '.'))
-                    
-                    if gross_match := re.search(patterns['gross_weight'], context):
-                        good_info['gross_weight'] = float(gross_match.group(1).replace(',', '.'))
-                    
-                    if all(k in good_info for k in ['name', 'hs_code']):
-                        goods_data.append(good_info)
-                        
-                except (AttributeError, ValueError) as e:
-                    logger.debug(f"Ошибка обработки блока товара: {e}")
-                    continue
+                good_info = {
+                    'hs_code': hs_code,
+                    'name': self._extract_good_name(context, hs_code),
+                    'net_weight': self._extract_value(context, r'38\s*Вес нетто\s*\(кг\)\s*(\d+[,.]?\d*)'),
+                    'gross_weight': self._extract_value(context, r'35\s*Вес брутто\s*\(кг\)\s*(\d+[,.]?\d*)')
+                }
+                
+                if good_info['hs_code']:  # Если найден код товара
+                    goods_data.append(good_info)
         
         return goods_data
     
     def load_rop_reference(self, pdf_path):
-        """Улучшенный метод для извлечения кодов ТН ВЭД из PDF"""
+        """Загрузка кодов ТН ВЭД ЕАЭС из постановления"""
         if not os.path.exists(pdf_path):
-            logger.error(f"Файл с кодами РОП не найден: {pdf_path}")
+            logger.error(f"Файл с кодами не найден: {pdf_path}")
             return []
         
         try:
-            # Извлекаем весь текст из PDF
             full_text = ""
             with pdfplumber.open(pdf_path) as pdf:
                 for page in pdf.pages:
                     full_text += page.extract_text() + "\n"
             
-            # Улучшенные шаблоны для поиска кодов ТН ВЭД
-            hs_code_patterns = [
-                r'(?:код\s*ТН\s*ВЭД|ТН\s*ВЭД)\s*(\d{4}\s?\d{2}\s?\d{2,4})',  # С указанием "код ТН ВЭД"
-                r'\b\d{4}\s?\d{2}\s?\d{2,4}\b',  # Просто 10 цифр с возможными пробелами
-                r'(?<!\d)\d{10}(?!\d)',  # Ровно 10 цифр подряд
+            # Ищем коды в разных форматах
+            code_patterns = [
+                r'(?:ТН\s*ВЭД\s*ЕАЭС|код\s*ТН\s*ВЭД\s*ЕАЭС)\s*(\d{6,10})',
+                r'\b\d{4}\s?\d{2}\s?\d{2,4}\b'
             ]
             
             found_codes = set()
-            
-            # Ищем по всем шаблонам
-            for pattern in hs_code_patterns:
+            for pattern in code_patterns:
                 matches = re.finditer(pattern, full_text, re.IGNORECASE)
                 for match in matches:
-                    code = re.sub(r'\D', '', match.group())  # Оставляем только цифры
-                    if len(code) == 10:  # Проверяем что код содержит 10 цифр
-                        found_codes.add(code)
+                    code = re.sub(r'\D', '', match.group(1) if match.groups() else match.group())
+                    if len(code) >= 6:  # Минимум 6 цифр
+                        found_codes.add(code.zfill(10))  # Нормализуем до 10 цифр
             
-            logger.info(f"Найдено {len(found_codes)} уникальных кодов ТН ВЭД")
+            logger.info(f"Найдено {len(found_codes)} кодов ТН ВЭД ЕАЭС")
             return list(found_codes)
             
         except Exception as e:
-            logger.error(f"Ошибка при загрузке кодов РОП: {e}")
+            logger.error(f"Ошибка загрузки кодов: {e}")
             return []
     
     def process_declaration(self, pdf_path, rop_codes):
-        """Обработка одной декларации с улучшенным логированием"""
+        """Обработка одной декларации"""
         try:
             goods = self.extract_goods_info(pdf_path)
             results = []
             
             for good in goods:
-                if good.get('hs_code', '') in rop_codes:
-                    packaging_weight = good.get('gross_weight', 0) - good.get('net_weight', 0)
-                    
+                if good['hs_code'] in rop_codes:
                     results.append({
-                        'Наименование товара': good.get('name', ''),
-                        'Количество': good.get('quantity', 0),
-                        'Код ТН ВЭД': good.get('hs_code', ''),
-                        'Вес нетто (кг)': good.get('net_weight', 0),
-                        'Вес упаковки (кг)': packaging_weight,
+                        'Наименование товара': good['name'],
+                        'Код ТН ВЭД': good['hs_code'],
+                        'Вес нетто (кг)': good['net_weight'],
+                        'Вес упаковки (кг)': good['gross_weight'] - good['net_weight'],
                         'Файл': os.path.basename(pdf_path)
                     })
             
             if results:
                 logger.info(f"Обработан {pdf_path}: найдено {len(results)} товаров под РОП")
-            else:
-                logger.debug(f"В {pdf_path} не найдено товаров под РОП")
-            
             return results
+            
         except Exception as e:
-            logger.error(f"Ошибка обработки {pdf_path}: {e}", exc_info=True)
+            logger.error(f"Ошибка обработки {pdf_path}: {e}")
             return []
     
     def process_folder(self, declarations_folder, rop_reference_path, output_file):
-        """Основная функция обработки с прогресс-баром"""
+        """Обработка всех деклараций в папке"""
         try:
-            # Загружаем справочник РОП
+            # Загрузка кодов РОП
             rop_codes = self.load_rop_reference(rop_reference_path)
-            logger.info(f"Загружено {len(rop_codes)} кодов ТН ВЭД под РОП")
+            if not rop_codes:
+                logger.error("Не загружены коды ТН ВЭД ЕАЭС")
+                return None
             
-            # Получаем список PDF файлов
+            # Получение списка PDF файлов
             pdf_files = [
                 os.path.join(declarations_folder, f) 
                 for f in os.listdir(declarations_folder) 
@@ -244,39 +213,33 @@ class ROPProcessor:
                     total=len(pdf_files),
                     desc="Обработка деклараций"
                 ))
-                
                 for result in results:
                     all_results.extend(result)
             
-            # Создаем итоговый DataFrame
-            df = pd.DataFrame(all_results)
-            
-            if not df.empty:
-                # Группируем по коду ТН ВЭД и наименованию
+            # Формирование отчета
+            if all_results:
+                df = pd.DataFrame(all_results)
                 report = df.groupby(['Код ТН ВЭД', 'Наименование товара']).agg({
-                    'Количество': 'sum',
                     'Вес нетто (кг)': 'sum',
                     'Вес упаковки (кг)': 'sum',
                     'Файл': lambda x: ", ".join(set(x))
                 }).reset_index()
                 
-                # Сохраняем отчет
                 report.to_excel(output_file, index=False)
                 logger.info(f"Отчет сохранен в {output_file}")
                 
-                # Визуализация
-                self.generate_plots(report)
-                
+                # Генерация графиков
+                self._generate_report_plots(report)
                 return report
             else:
-                logger.warning("Не найдено товаров, попадающих под РОП")
+                logger.warning("Не найдено товаров под РОП")
                 return None
                 
         except Exception as e:
-            logger.error(f"Критическая ошибка обработки: {e}", exc_info=True)
+            logger.error(f"Критическая ошибка: {e}")
             raise
     
-    def generate_plots(self, report):
+    def _generate_report_plots(self, report):
         """Генерация графиков для отчета"""
         try:
             # Топ-10 товаров по весу упаковки
@@ -300,7 +263,7 @@ class ROPProcessor:
                 startangle=90,
                 counterclock=False
             )
-            plt.title('Распределение веса по кодам ТН ВЭД')
+            plt.title('Распределение веса по кодам ТН ВЭД ЕАЭС')
             plt.ylabel('')
             plt.tight_layout()
             plt.savefig('hs_code_distribution.png')
@@ -314,10 +277,16 @@ if __name__ == "__main__":
     try:
         processor = ROPProcessor()
         
-        # Пути к файлам (замените на актуальные)
-        declarations_folder = './2. scr/ДТ'  # Папка с декларациями
-        rop_reference = './1. docs/Постановление Правительства Российской Федерации от 29.12.2023 № 2414 (с 2024 года).pdf'   # Файл с кодами ТН ВЭД под РОП
-        output_file = './2. scr/output'       # Выходной файл
+        # Пути к файлам
+        declarations_folder = './2. scr/ДТ'
+        rop_reference = './1. docs/Постановление Правительства Российской Федерации от 29.12.2023 № 2414 (с 2024 года).pdf'
+        output_file = './2. scr/output.xlsx'
+        
+        # Проверка существования файлов
+        if not os.path.exists(declarations_folder):
+            raise FileNotFoundError(f"Папка с декларациями не найдена: {declarations_folder}")
+        if not os.path.exists(rop_reference):
+            raise FileNotFoundError(f"Файл с кодами РОП не найден: {rop_reference}")
         
         # Запуск обработки
         result = processor.process_folder(declarations_folder, rop_reference, output_file)
@@ -326,6 +295,7 @@ if __name__ == "__main__":
             print("\nРезультаты обработки:")
             print(result.head())
             print(f"\nПолный отчет сохранен в {output_file}")
+            print("Графики сохранены в текущей директории")
+        
     except Exception as e:
-        logger.error(f"Ошибка выполнения программы: {e}", exc_info=True)
-        raise
+        logger.error(f"Ошибка выполнения программы: {e}")
