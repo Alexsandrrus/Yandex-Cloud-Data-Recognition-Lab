@@ -30,8 +30,8 @@ pip install -r requirements.txt
 from scripts.pdf_processor import process_declarations
 
 report = process_declarations(
-    declarations_dir="ДТ",
-    regulation_path="Постановление Правительства Российской Федерации от 29.12.2023 № 2414 (с 2024 года).pdf"
+    declarations_dir=".\2. scr\ДТ",
+    regulation_path="./1. docs\Постановление Правительства Российской Федерации от 29.12.2023 № 2414 (с 2024 года).pdf"
 )
 report.to_excel("outputs/epr_report.xlsx")
 ```

@@ -217,9 +217,9 @@ if __name__ == "__main__":
     processor = ROPProcessor()
     
     # Пути к файлам (замените на актуальные)
-    declarations_folder = './ДТ'
-    rop_reference = './Постановление Правительства Российской Федерации от 29.12.2023 № 2414 (с 2024 года).pdf'
-    output_file = './output'
+    declarations_folder = './2. scr/ДТ'
+    rop_reference = './1. docs/Постановление Правительства Российской Федерации от 29.12.2023 № 2414 (с 2024 года).pdf'
+    output_file = './2. scr/output'
     
     # Запуск обработки
     result = processor.process_folder(declarations_folder, rop_reference, output_file)
