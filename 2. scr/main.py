@@ -121,6 +121,7 @@ class ROPProcessor:
                 good_info = {
                     'hs_code': hs_code,
                     'name': self._extract_good_name(context, hs_code),
+                    'quantity': self._extract_value(context, r'41\s*Количество\s*(\d+[,.]?\d*)'),  # Поле 41 - количество
                     'net_weight': self._extract_value(context, r'38\s*Вес нетто\s*\(кг\)\s*(\d+[,.]?\d*)'),
                     'gross_weight': self._extract_value(context, r'35\s*Вес брутто\s*\(кг\)\s*(\d+[,.]?\d*)')
                 }
@@ -174,6 +175,7 @@ class ROPProcessor:
                     results.append({
                         'Наименование товара': good['name'],
                         'Код ТН ВЭД': good['hs_code'],
+                        'Количество (шт)': good['quantity'],
                         'Вес нетто (кг)': good['net_weight'],
                         'Вес упаковки (кг)': good['gross_weight'] - good['net_weight'],
                         'Файл': os.path.basename(pdf_path)
@@ -220,11 +222,13 @@ class ROPProcessor:
             if all_results:
                 df = pd.DataFrame(all_results)
                 report = df.groupby(['Код ТН ВЭД', 'Наименование товара']).agg({
+                    'Количество (шт)': 'sum',
                     'Вес нетто (кг)': 'sum',
                     'Вес упаковки (кг)': 'sum',
                     'Файл': lambda x: ", ".join(set(x))
                 }).reset_index()
                 
+                # Сохранение в Excel
                 report.to_excel(output_file, index=False)
                 logger.info(f"Отчет сохранен в {output_file}")
                 
@@ -269,6 +273,20 @@ class ROPProcessor:
             plt.savefig('hs_code_distribution.png')
             plt.close()
             
+            # Топ-10 товаров по количеству
+            plt.figure(figsize=(12, 6))
+            top_quantity = report.nlargest(10, 'Количество (шт)')
+            plt.barh(
+                top_quantity['Наименование товара'].str[:50] + " (" + top_quantity['Код ТН ВЭД'] + ")",
+                top_quantity['Количество (шт)'],
+                color='lightgreen'
+            )
+            plt.title('Топ-10 товаров по количеству (РОП)')
+            plt.xlabel('Количество, шт')
+            plt.tight_layout()
+            plt.savefig('top_quantity.png')
+            plt.close()
+            
             logger.info("Графики сохранены в текущую директорию")
         except Exception as e:
             logger.error(f"Ошибка генерации графиков: {e}")
@@ -277,16 +295,19 @@ if __name__ == "__main__":
     try:
         processor = ROPProcessor()
         
-        # Пути к файлам
-        declarations_folder = './2. scr/ДТ'
-        rop_reference = './1. docs/Постановление Правительства Российской Федерации от 29.12.2023 № 2414 (с 2024 года).pdf'
-        output_file = './2. scr/output.xlsx'
+        # Пути к файлам (примерные, нужно адаптировать под вашу структуру)
+        declarations_folder = './2. scr/Выгрузки по импорту'  # Папка с декларациями
+        rop_reference = './1. docs/Постановление Правительства Российской Федерации от 29.12.2023 № 2414 (с 2024 года).pdf'  # Файл с кодами РОП
+        output_file = './2. scr/output/ROP_report.xlsx'  # Выходной файл
         
         # Проверка существования файлов
         if not os.path.exists(declarations_folder):
             raise FileNotFoundError(f"Папка с декларациями не найдена: {declarations_folder}")
         if not os.path.exists(rop_reference):
             raise FileNotFoundError(f"Файл с кодами РОП не найден: {rop_reference}")
+        
+        # Создание папки для результатов, если ее нет
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
         
         # Запуск обработки
         result = processor.process_folder(declarations_folder, rop_reference, output_file)
