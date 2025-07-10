@@ -4,3 +4,8 @@ pdfplumber
 matplotlib 
 torch 
 transformers
+pytesseract 
+pdf2image 
+opencv-python
+numpy 
+pillow

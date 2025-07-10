@@ -2,10 +2,12 @@ import os
 import re
 import logging
 import pandas as pd
+import numpy as np
 from tqdm import tqdm
 import pdfplumber
-import matplotlib.pyplot as plt
-import torch
+import cv2
+import pytesseract
+from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
@@ -13,171 +15,239 @@ from functools import partial
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class ROPProcessor:
+# Укажите путь к tesseract если он не в PATH
+# pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+class PDFTextExtractor:
     def __init__(self):
-        """Упрощенная инициализация без сложных моделей"""
-        logger.info("Инициализация процессора РОП")
         self.cache = {}
-    
-    def extract_text_from_pdf(self, pdf_path):
-        """Извлечение текста из PDF с базовой обработкой ошибок"""
+        
+    def extract_text(self, pdf_path):
+        """Комбинированный метод извлечения текста (PDF + OCR)"""
         if pdf_path in self.cache:
             return self.cache[pdf_path]
             
+        try:
+            # Сначала пробуем извлечь текст напрямую
+            text = self._extract_with_pdfplumber(pdf_path)
+            
+            # Если текста мало, пробуем OCR
+            if len(text) < 100:
+                ocr_text = self._extract_with_ocr(pdf_path)
+                if len(ocr_text) > len(text):
+                    text = ocr_text
+                    
+            self.cache[pdf_path] = text
+            return text
+            
+        except Exception as e:
+            logger.error(f"Ошибка извлечения текста из {pdf_path}: {e}")
+            return []
+
+    def _extract_with_pdfplumber(self, pdf_path):
+        """Извлечение текста из PDF с помощью pdfplumber"""
+        text = []
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if not page_text:
+                    page_text = " ".join([word['text'] for word in page.extract_words()])
+                text.append(page_text)
+        return text
+
+    def _extract_with_ocr(self, pdf_path):
+        """Извлечение текста с помощью OCR (для сканированных PDF)"""
         text = []
         try:
-            with pdfplumber.open(pdf_path) as pdf:
-                for page in pdf.pages:
-                    # Пробуем разные методы извлечения текста
-                    page_text = page.extract_text()
-                    if not page_text:
-                        page_text = " ".join([word['text'] for word in page.extract_words()])
-                    text.append(page_text)
-            self.cache[pdf_path] = text
+            images = self._convert_pdf_to_images(pdf_path)
+            for img in images:
+                # Предварительная обработка изображения
+                processed = self._preprocess_image(img)
+                # Извлечение текста с помощью Tesseract
+                page_text = pytesseract.image_to_string(processed, lang='rus+eng')
+                text.append(page_text)
         except Exception as e:
-            logger.error(f"Ошибка чтения PDF {pdf_path}: {e}")
-            raise
-
+            logger.error(f"OCR error: {e}")
         return text
-    
-    def _extract_value(self, text, pattern):
-        """Улучшенное извлечение числовых значений"""
-        match = re.search(pattern, text)
-        if match:
-            try:
-                # Обрабатываем разные форматы чисел
-                num_str = match.group(1).replace(',', '.').replace(' ', '')
-                return float(num_str)
-            except (ValueError, AttributeError):
-                return 0.0
-        return 0.0
-    
-    def _extract_good_name(self, text, hs_code):
-        """Улучшенное извлечение наименования товара"""
-        # Ищем текст между "Описание товаров" и кодом ТН ВЭД
-        patterns = [
-            r'Описание\s*товаров?\s*(.*?)\d{6,10}',
-            r'Наименование\s*товара\s*(.*?)\d{6,10}',
-            r'31\s*(.*?)\d{6,10}'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-            if match:
-                name = match.group(1).strip()
-                # Очистка от лишних символов
-                name = re.sub(r'[\n\t\r]+', ' ', name)
-                name = re.sub(r'\s{2,}', ' ', name)
-                return name
-        return f"Товар {hs_code}"
-    
-    def extract_goods_info(self, pdf_path):
-        """Улучшенное извлечение информации о товарах"""
-        text_data = self.extract_text_from_pdf(pdf_path)
-        goods_data = []
-        
-        for page_text in text_data:
-            # Нормализация текста
-            page_text = re.sub(r'\s+', ' ', page_text)
+
+    def _convert_pdf_to_images(self, pdf_path, dpi=300):
+        """Конвертация PDF в изображения"""
+        try:
+            from pdf2image import convert_from_path
+            return convert_from_path(pdf_path, dpi=dpi)
+        except ImportError:
+            logger.error("Для OCR требуется pdf2image: pip install pdf2image")
+            return []
+        except Exception as e:
+            logger.error(f"Ошибка конвертации PDF в изображения: {e}")
+            return []
+
+    def _preprocess_image(self, image):
+        """Улучшение изображения для OCR"""
+        try:
+            # Конвертация в OpenCV формат
+            img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
             
-            # Улучшенные шаблоны для поиска кодов товаров
-            hs_code_patterns = [
-                r'Код\s*товара\s*(\d{6,10})',
-                r'ТН\s*ВЭД\s*(\d{6,10})',
-                r'33\s*(\d{6,10})'
-            ]
+            # Увеличение контраста
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            enhanced = clahe.apply(gray)
             
-            for pattern in hs_code_patterns:
-                for hs_match in re.finditer(pattern, page_text):
-                    hs_code = hs_match.group(1)
-                    context_start = max(0, hs_match.start()-500)
-                    context_end = hs_match.end()+500
-                    context = page_text[context_start:context_end]
-                    
-                    good_info = {
-                        'hs_code': hs_code,
-                        'name': self._extract_good_name(context, hs_code),
-                        'quantity': self._extract_value(context, r'(Количество|41)\s*(\d+[,.]?\d*)'),
-                        'net_weight': self._extract_value(context, r'(Вес\s*нетто|38)\s*(\d+[,.]?\d*)'),
-                        'gross_weight': self._extract_value(context, r'(Вес\s*брутто|35)\s*(\d+[,.]?\d*)')
-                    }
-                    
-                    if len(hs_code) >= 6:  # Минимальная длина кода
-                        goods_data.append(good_info)
-        
-        return goods_data
-    
+            # Бинаризация
+            _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            
+            # Удаление шума
+            kernel = np.ones((1,1), np.uint8)
+            cleaned = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+            
+            return Image.fromarray(cleaned)
+        except Exception as e:
+            logger.error(f"Ошибка обработки изображения: {e}")
+            return image
+
+class ROPProcessor:
+    def __init__(self):
+        logger.info("Инициализация процессора РОП")
+        self.extractor = PDFTextExtractor()
+        self.cache = {}
+
     def load_rop_reference(self, pdf_path):
-        """Улучшенная загрузка кодов ТН ВЭД из постановления"""
+        """Загрузка кодов ТН ВЭД с улучшенным поиском"""
         if not os.path.exists(pdf_path):
             logger.error(f"Файл с кодами не найден: {pdf_path}")
             return []
         
         try:
-            full_text = "\n".join(self.extract_text_from_pdf(pdf_path))
+            text_pages = self.extractor.extract_text(pdf_path)
+            full_text = "\n".join(text_pages)
             
-            # Улучшенные шаблоны для поиска кодов
-            code_patterns = [
-                r'(?:ТН\s*ВЭД\s*ЕАЭС|код\s*ТН\s*ВЭД)\s*(\d{4}\s?\d{2}\s?\d{2,4})',
-                r'\b\d{4}[\.\s]?\d{2}[\.\s]?\d{2,4}\b',
-                r'Приложение\s*[№N]\s*\d+\s*.*?(\d{6,10})'
+            # Сохраним текст для отладки
+            debug_file = os.path.join("debug", os.path.basename(pdf_path) + ".txt")
+            os.makedirs(os.path.dirname(debug_file), exist_ok=True)
+            with open(debug_file, "w", encoding="utf-8") as f:
+                f.write(full_text)
+            
+            # Улучшенные шаблоны для табличных данных
+            table_patterns = [
+                r'(?:код\s*ТН\s*ВЭД|ТН\s*ВЭД\s*ЕАЭС)\s*(\d{6,10})',
+                r'\b\d{4}\.?\d{2}\.?\d{2,4}\b',
+                r'(?<!\d)(\d{4})\s?(\d{2})\s?(\d{2,4})(?!\d)'
             ]
             
             found_codes = set()
-            for pattern in code_patterns:
-                matches = re.finditer(pattern, full_text, re.IGNORECASE)
+            for pattern in table_patterns:
+                matches = re.finditer(pattern, full_text)
                 for match in matches:
-                    code = re.sub(r'[^\d]', '', match.group(1) if match.groups() else match.group())
+                    code = "".join([g for g in match.groups() if g]) if match.groups() else match.group()
+                    code = re.sub(r'[^\d]', '', code)
                     if 6 <= len(code) <= 10:
-                        found_codes.add(code[:10].ljust(10, '0'))  # Нормализация до 10 цифр
+                        normalized = code.ljust(10, '0')[:10]
+                        found_codes.add(normalized)
             
-            logger.info(f"Найдено {len(found_codes)} кодов ТН ВЭД ЕАЭС")
-            return list(found_codes)
+            if not found_codes:
+                # Альтернативный метод поиска в таблицах
+                found_codes.update(self._find_codes_in_tables(pdf_path))
+            
+            logger.info(f"Найдено {len(found_codes)} кодов ТН ВЭД")
+            return sorted(found_codes)
             
         except Exception as e:
             logger.error(f"Ошибка загрузки кодов: {e}")
             return []
-    
-    def process_declaration(self, pdf_path, rop_codes):
-        """Обработка одной декларации с улучшенным логированием"""
+
+    def _find_codes_in_tables(self, pdf_path):
+        """Поиск кодов в таблицах PDF"""
+        codes = set()
         try:
-            goods = self.extract_goods_info(pdf_path)
-            results = []
-            
-            for good in goods:
-                # Проверяем полное совпадение или начало кода
-                if any(good['hs_code'].startswith(code) for code in rop_codes):
-                    results.append({
-                        'Наименование товара': good['name'],
-                        'Код ТН ВЭД': good['hs_code'],
-                        'Количество (шт)': good['quantity'],
-                        'Вес нетто (кг)': good['net_weight'],
-                        'Вес упаковки (кг)': max(0, good['gross_weight'] - good['net_weight']),
-                        'Файл': os.path.basename(pdf_path)
-                    })
-            
-            if results:
-                logger.info(f"Обработан {pdf_path}: найдено {len(results)} товаров под РОП")
-            else:
-                logger.debug(f"В {pdf_path} не найдено товаров под РОП")
-            return results
-            
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    tables = page.extract_tables()
+                    for table in tables:
+                        for row in table:
+                            for cell in row:
+                                if cell and isinstance(cell, str):
+                                    matches = re.findall(r'\b\d{6,10}\b', cell)
+                                    codes.update(matches)
         except Exception as e:
-            logger.error(f"Ошибка обработки {pdf_path}: {e}")
-            return []
-    
+            logger.error(f"Ошибка извлечения таблиц: {e}")
+        return codes
+
+    def extract_goods_info(self, pdf_path):
+        """Извлечение информации о товарах с улучшенной обработкой"""
+        text_pages = self.extractor.extract_text(pdf_path)
+        goods_data = []
+        
+        for page_text in text_pages:
+            # Нормализация текста
+            page_text = re.sub(r'\s+', ' ', page_text)
+            
+            # Поиск кодов товаров
+            hs_codes = re.findall(r'\b\d{6,10}\b', page_text)
+            for hs_code in hs_codes:
+                # Поиск контекста вокруг кода
+                context = self._get_code_context(page_text, hs_code)
+                
+                good_info = {
+                    'hs_code': hs_code,
+                    'name': self._extract_good_name(context, hs_code),
+                    'quantity': self._extract_value(context, r'(Количество|41)\s*[:=]?\s*(\d+[\.,]?\d*)'),
+                    'net_weight': self._extract_value(context, r'(Вес\s*нетто|38)\s*[:=]?\s*(\d+[\.,]?\d*)'),
+                    'gross_weight': self._extract_value(context, r'(Вес\s*брутто|35)\s*[:=]?\s*(\d+[\.,]?\d*)')
+                }
+                
+                if len(hs_code) >= 6:
+                    goods_data.append(good_info)
+        
+        return goods_data
+
+    def _get_code_context(self, text, code, window=500):
+        """Получение контекста вокруг кода"""
+        pos = text.find(code)
+        start = max(0, pos - window)
+        end = min(len(text), pos + len(code) + window)
+        return text[start:end]
+
+    def _extract_good_name(self, text, hs_code):
+        """Извлечение наименования товара"""
+        patterns = [
+            r'Наименование\s*товара[^\w]*([^\d]+?)\d{6,10}',
+            r'Описание\s*товара[^\w]*([^\d]+?)\d{6,10}',
+            r'31[^\w]*([^\d]+?)\d{6,10}'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                name = match.group(1).strip()
+                name = re.sub(r'[\n\t\r]+', ' ', name)
+                name = re.sub(r'\s{2,}', ' ', name)
+                return name
+        return f"Товар {hs_code}"
+
+    def _extract_value(self, text, pattern):
+        """Извлечение числовых значений"""
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            try:
+                num_str = match.group(2) if match.groups() > 1 else match.group(1)
+                num_str = num_str.replace(',', '.').replace(' ', '')
+                return float(num_str)
+            except (ValueError, AttributeError):
+                return 0.0
+        return 0.0
+
     def process_folder(self, declarations_folder, rop_reference_path, output_file):
-        """Основной метод обработки с улучшенной обработкой ошибок"""
+        """Обработка папки с декларациями"""
         try:
             # Загрузка кодов РОП
             rop_codes = self.load_rop_reference(rop_reference_path)
             if not rop_codes:
-                logger.error("Не загружены коды ТН ВЭД ЕАЭС. Проверьте файл с постановлением.")
+                logger.error("Не удалось загрузить коды ТН ВЭД")
                 return None
             
-            logger.info(f"Загружены коды РОП: {rop_codes[:5]}... (всего {len(rop_codes)})")
+            logger.info(f"Загружены коды РОП. Примеры: {rop_codes[:5]}")
             
-            # Получение списка PDF файлов
+            # Поиск PDF файлов
             pdf_files = []
             for root, _, files in os.walk(declarations_folder):
                 for file in files:
@@ -193,20 +263,17 @@ class ROPProcessor:
             # Обработка файлов
             all_results = []
             with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-                process_func = partial(self.process_declaration, rop_codes=rop_codes)
+                process_func = partial(self._process_declaration, rop_codes=rop_codes)
                 results = list(tqdm(
                     executor.map(process_func, pdf_files),
                     total=len(pdf_files),
                     desc="Обработка деклараций"
                 ))
-                for result in results:
-                    all_results.extend(result)
+                all_results = [item for sublist in results for item in sublist]
             
             # Формирование отчета
             if all_results:
                 df = pd.DataFrame(all_results)
-                
-                # Группировка с учетом возможных None значений
                 report = df.groupby(['Код ТН ВЭД', 'Наименование товара']).agg({
                     'Количество (шт)': 'sum',
                     'Вес нетто (кг)': 'sum',
@@ -214,38 +281,58 @@ class ROPProcessor:
                     'Файл': lambda x: ", ".join(set(x.dropna()))
                 }).reset_index()
                 
-                # Сохранение отчета
                 os.makedirs(os.path.dirname(output_file), exist_ok=True)
                 report.to_excel(output_file, index=False)
                 logger.info(f"Отчет сохранен в {output_file}")
-                
-                # Дополнительная информация
-                total_weight = report['Вес нетто (кг)'].sum()
-                logger.info(f"Всего найдено {len(report)} позиций, общий вес: {total_weight:.2f} кг")
-                
                 return report
             else:
-                logger.warning("Не найдено товаров под РОП. Проверьте коды в постановлении.")
+                logger.warning("Не найдено товаров под РОП")
                 return None
                 
         except Exception as e:
-            logger.error(f"Критическая ошибка: {e}")
+            logger.error(f"Ошибка обработки: {e}")
             raise
+
+    def _process_declaration(self, pdf_path, rop_codes):
+        """Обработка одной декларации"""
+        try:
+            goods = self.extract_goods_info(pdf_path)
+            results = []
+            
+            for good in goods:
+                if any(good['hs_code'].startswith(code) for code in rop_codes):
+                    results.append({
+                        'Наименование товара': good['name'],
+                        'Код ТН ВЭД': good['hs_code'],
+                        'Количество (шт)': good['quantity'],
+                        'Вес нетто (кг)': good['net_weight'],
+                        'Вес упаковки (кг)': max(0, good['gross_weight'] - good['net_weight']),
+                        'Файл': os.path.basename(pdf_path)
+                    })
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Ошибка обработки {pdf_path}: {e}")
+            return []
 
 if __name__ == "__main__":
     try:
         processor = ROPProcessor()
         
-        # Укажите правильные пути к файлам
-        declarations_folder = './2. scr/Выгрузки по импорту'
-        rop_reference = './1. docs/Постановление Правительства РФ о РОП.pdf'
-        output_file = './2. scr/output/ROP_report.xlsx'
+        # Пути к файлам (используйте raw строки или двойные слеши)
+        declarations_folder = os.path.normpath(r'2. scr/ДТ')
+        rop_reference = os.path.normpath(r'1. docs/Постановление Правительства Российской Федерации от 29.12.2023 № 2414 (с 2024 года).pdf')
+        output_file = os.path.normpath(r'2. scr/output/ROP_report.xlsx')
         
         # Проверка путей
         if not os.path.exists(declarations_folder):
-            raise FileNotFoundError(f"Папка с декларациями не найдена: {declarations_folder}")
+            raise FileNotFoundError(f"Папка не найдена: {declarations_folder}")
         if not os.path.exists(rop_reference):
-            raise FileNotFoundError(f"Файл с кодами РОП не найден: {rop_reference}")
+            raise FileNotFoundError(f"Файл не найден: {rop_reference}")
+        
+        # Создаем папку для отладки
+        os.makedirs("debug", exist_ok=True)
         
         # Запуск обработки
         result = processor.process_folder(declarations_folder, rop_reference, output_file)
@@ -256,4 +343,4 @@ if __name__ == "__main__":
             print(f"\nПолный отчет сохранен в {output_file}")
         
     except Exception as e:
-        logger.error(f"Ошибка выполнения программы: {e}")
+        logger.error(f"Ошибка выполнения: {e}")
