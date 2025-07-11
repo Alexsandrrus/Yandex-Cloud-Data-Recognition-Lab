@@ -1,198 +1,258 @@
 import os
 import re
 import logging
-import pandas as pd
+import string
+from pathlib import Path
+from PyPDF2 import PdfReader
+from pdfminer.high_level import extract_pages
+from pdfminer.layout import LTTextContainer
+import pdfplumber
 from pdf2image import convert_from_path
 import pytesseract
-from PIL import Image
-import cv2
-import numpy as np
-
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
-)
-logger = logging.getLogger(__name__)
+from PIL import Image, ImageEnhance, ImageFilter
 
 class PDFTextExtractor:
     def __init__(self):
-        # Укажите правильные пути для вашей системы
-        self.poppler_path = r'C:\Program Files\poppler-23.11.0\Library\bin'
         self.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-        pytesseract.pytesseract.tesseract_cmd = self.tesseract_cmd
+        self.poppler_path = r'C:\Program Files\poppler-24.08.0\Library\bin'
+        self._setup_logging()
+        self._setup_environment()
 
-    def extract_text(self, pdf_path):
-        """Комбинированное извлечение текста (PDF + OCR)"""
-        try:
-            # Сначала пробуем извлечь текст как обычный PDF
-            text = self._extract_with_pdfplumber(pdf_path)
-            if len(text) > 200:  # Достаточно текста
-                return text
-            
-            # Если текста мало, пробуем OCR
-            ocr_text = self._extract_with_ocr(pdf_path)
-            return ocr_text if len(ocr_text) > len(text) else text
-            
-        except Exception as e:
-            logger.error(f"Ошибка извлечения текста: {e}")
-            return ""
+    def _setup_logging(self):
+        """Настройка системы логирования"""
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.StreamHandler(),
+                logging.FileHandler('pdf_extractor.log', encoding='utf-8')
+            ]
+        )
+        self.logger = logging.getLogger(__name__)
 
-    def _extract_with_pdfplumber(self, pdf_path):
-        """Извлечение текста из PDF напрямую"""
-        import pdfplumber
+    def _setup_environment(self):
+        """Проверка и настройка зависимостей"""
+        # Проверка Tesseract
+        if os.path.exists(self.tesseract_cmd):
+            pytesseract.pytesseract.tesseract_cmd = self.tesseract_cmd
+            self.logger.info(f"Tesseract настроен: {self.tesseract_cmd}")
+            
+            # Проверка русского языка
+            tessdata_dir = r'C:\Program Files\Tesseract-OCR\tessdata'
+            rus_traineddata = os.path.join(tessdata_dir, 'rus.traineddata')
+            if os.path.exists(rus_traineddata):
+                self.logger.info("Русский язык обнаружен в Tesseract")
+            else:
+                self.logger.error(f"Файл rus.traineddata не найден в: {tessdata_dir}")
+                self.logger.info("Скачайте его с: https://github.com/tesseract-ocr/tessdata")
+                self.logger.info(f"И поместите в: {tessdata_dir}")
+        else:
+            self.logger.error(f"Tesseract не найден по пути: {self.tesseract_cmd}")
+
+        # Проверка Poppler
+        if os.path.exists(self.poppler_path):
+            self.logger.info(f"Poppler настроен: {self.poppler_path}")
+        else:
+            self.logger.error(f"Poppler не найден по пути: {self.poppler_path}")
+
+    def extract_text(self, pdf_path: str) -> str:
+        """Основной метод извлечения текста"""
+        pdf_path = str(Path(pdf_path).resolve())
+        
+        if not os.path.exists(pdf_path):
+            raise FileNotFoundError(f"PDF файл не найден: {pdf_path}")
+
+        methods = [
+            self._extract_with_pdfplumber,
+            self._extract_with_pypdf2,
+            self._extract_with_pdfminer,
+            self._extract_with_ocr
+        ]
+        
+        best_text = ""
+        for method in methods:
+            try:
+                current_text = method(pdf_path)
+                if self._is_text_better(best_text, current_text):
+                    best_text = current_text
+                    self.logger.info(f"Метод {method.__name__} дал улучшение")
+            except Exception as e:
+                self.logger.warning(f"Ошибка в {method.__name__}: {e}")
+        
+        return self._clean_text(best_text) if best_text else ""
+
+    def _is_text_better(self, old: str, new: str) -> bool:
+        """Сравнивает качество текста"""
+        if not new:
+            return False
+        return len(new) > len(old) * 1.1 or self._has_more_cyrillic(new, old)
+
+    def _has_more_cyrillic(self, new: str, old: str) -> bool:
+        """Сравнивает количество кириллицы"""
+        cyr_new = len(re.findall('[а-яА-ЯёЁ]', new))
+        cyr_old = len(re.findall('[а-яА-ЯёЁ]', old))
+        return cyr_new > cyr_old * 1.5
+
+    def _extract_with_pdfplumber(self, pdf_path: str) -> str:
+        """Извлечение с помощью pdfplumber"""
         text = []
         try:
             with pdfplumber.open(pdf_path) as pdf:
                 for page in pdf.pages:
-                    text.append(page.extract_text() or "")
+                    page_text = page.extract_text() or ""
+                    if page_text:
+                        text.append(page_text)
             return "\n".join(text)
         except Exception as e:
-            logger.warning(f"PDFPlumber error: {e}")
+            self.logger.warning(f"PDFPlumber error: {e}")
             return ""
 
-    def _extract_with_ocr(self, pdf_path):
-        """Извлечение текста через OCR"""
+    def _extract_with_pypdf2(self, pdf_path: str) -> str:
+        """Извлечение с помощью PyPDF2"""
+        text = []
         try:
+            with open(pdf_path, 'rb') as file:
+                reader = PdfReader(file)
+                for page in reader.pages:
+                    page_text = page.extract_text() or ""
+                    if page_text:
+                        text.append(page_text)
+            return "\n".join(text)
+        except Exception as e:
+            self.logger.warning(f"PyPDF2 error: {e}")
+            return ""
+
+    def _extract_with_pdfminer(self, pdf_path: str) -> str:
+        """Извлечение с помощью PDFMiner"""
+        text = []
+        try:
+            for page_layout in extract_pages(pdf_path):
+                page_text = ""
+                for element in page_layout:
+                    if isinstance(element, LTTextContainer):
+                        page_text += element.get_text() + "\n"
+                if page_text:
+                    text.append(page_text)
+            return "\n".join(text)
+        except Exception as e:
+            self.logger.warning(f"PDFMiner error: {e}")
+            return ""
+
+    def _extract_with_ocr(self, pdf_path: str) -> str:
+        """Извлечение текста с помощью OCR"""
+        if not os.path.exists(self.poppler_path):
+            self.logger.warning("Poppler не доступен, пропускаем OCR")
+            return ""
+            
+        try:
+            text = []
             images = convert_from_path(
                 pdf_path,
                 poppler_path=self.poppler_path,
                 dpi=400,
+                grayscale=True,
                 thread_count=4
             )
-            full_text = []
+            
             for img in images:
-                processed = self._preprocess_image(img)
-                text = pytesseract.image_to_string(
-                    processed,
+                img = self._enhance_image(img)
+                page_text = pytesseract.image_to_string(
+                    img,
                     lang='rus+eng',
-                    config='--psm 6 --oem 3'
+                    config='--oem 3 --psm 6'
                 )
-                full_text.append(text)
-            return "\n".join(full_text)
+                if page_text:
+                    text.append(page_text)
+            
+            return "\n".join(text)
         except Exception as e:
-            logger.error(f"OCR error: {e}")
+            self.logger.error(f"OCR error: {e}")
             return ""
 
-    def _preprocess_image(self, image):
+    def _enhance_image(self, img: Image.Image) -> Image.Image:
         """Улучшение качества изображения для OCR"""
         try:
-            img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            # Конвертация в grayscale
+            img = img.convert('L')
             
-            # Улучшение контраста
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-            enhanced = clahe.apply(gray)
+            # Увеличение контраста
+            enhancer = ImageEnhance.Contrast(img)
+            img = enhancer.enhance(1.5)
             
             # Бинаризация
-            _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            img = img.point(lambda x: 0 if x < 140 else 255)
             
-            # Удаление шума
-            kernel = np.ones((2,2), np.uint8)
-            cleaned = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+            # Уменьшение шума
+            img = img.filter(ImageFilter.MedianFilter(size=3))
             
-            return Image.fromarray(cleaned)
+            return img
         except Exception as e:
-            logger.warning(f"Image processing error: {e}")
-            return image
+            self.logger.warning(f"Image enhancement error: {e}")
+            return img
 
-class RegulationParser:
-    def __init__(self):
-        self.extractor = PDFTextExtractor()
-        # Улучшенные шаблоны для поиска данных
-        self.pattern = re.compile(
-            r'(?P<name>.*?[^\d])\n'  # Наименование товара
-            r'.*?(?:упаковка|тар[аы]).*?\n'  # Упаковка
-            r'.*?ТН\s*ВЭД\s*ЕАЭС\s*(?P<code>\d{4}[\.\s]?\d{2}[\.\s]?\d{2,4})',  # Код
-            re.IGNORECASE | re.DOTALL
+    def _clean_text(self, text: str) -> str:
+        """Очистка и форматирование текста"""
+        if not text:
+            return ""
+            
+        # Удаление лишних пробелов
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        # Восстановление абзацев
+        text = re.sub(r'(?<=[.!?])\s+(?=[А-ЯA-Z])', '\n\n', text)
+        
+        # Сохранение только нужных символов
+        allowed = (
+            string.digits + 
+            'абвгдеёжзийклмнопрстуфхцчшщъыьэюя' +
+            'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ' +
+            r' .,!?()[]{}<>|/\\:;"«»%-–—+\n№'
         )
-
-    def parse_regulation(self, pdf_path):
-        """Анализ постановления и извлечение данных"""
-        if not os.path.exists(pdf_path):
-            raise FileNotFoundError(f"Файл не найден: {pdf_path}")
-
-        text = self.extractor.extract_text(pdf_path)
+        text = ''.join(c for c in text if c in allowed)
         
-        # Сохраняем извлеченный текст для отладки
-        os.makedirs("debug", exist_ok=True)
-        with open("debug/extracted_text.txt", "w", encoding="utf-8") as f:
-            f.write(text)
-
-        # Извлекаем данные
-        items = []
-        for match in self.pattern.finditer(text):
-            name = re.sub(r'\s+', ' ', match.group('name')).strip()
-            code = re.sub(r'[^\d]', '', match.group('code'))
-            code = code.ljust(10, '0')[:10]
-            
-            items.append({
-                'Наименование товара, упаковки': name,
-                'Код единой Товарной номенклатуры внешнеэкономической деятельности Евразийского экономического союза(ТН ВЭД ЕАЭС)': code
-            })
+        # Улучшение форматирования чисел
+        text = re.sub(r'(\d)\s+(\d)', r'\1\2', text)
         
-        return items
-
-    def save_to_excel(self, items, output_path):
-        """Сохранение результатов в Excel"""
-        if not items:
-            logger.warning("Нет данных для сохранения")
-            return False
-            
-        df = pd.DataFrame(items)
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        
-        # Создаем Excel файл с настройками
-        with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='Товары')
-            
-            # Настройка ширины колонок
-            worksheet = writer.sheets['Товары']
-            worksheet.set_column('A:A', 60)  # Широкая колонка для наименования
-            worksheet.set_column('B:B', 15)  # Узкая колонка для кода
-        
-        logger.info(f"Результаты сохранены в: {output_path}")
-        return True
+        return text
 
 def main():
+    extractor = PDFTextExtractor()
+    
     try:
-        parser = RegulationParser()
+        # Определение путей
+        base_dir = Path(__file__).parent.resolve()
+        input_pdf = base_dir / '../1. docs/Постановление Правительства Российской Федерации от 29.12.2023 № 2414 (с 2024 года).pdf'
+        output_dir = base_dir / '../2. scr/output/'
+        output_txt = output_dir / 'extracted_text.txt'
         
-        # Конфигурация путей
-        config = {
-            'input': '../1. docs/Постановление Правительства Российской Федерации от 29.12.2023 № 2414 (с 2024 года).pdf',
-            'output': '../2. scr/output/Результаты_анализа.xlsx'
-        }
+        # Создание директории
+        output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Нормализация путей
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        for key in config:
-            config[key] = os.path.normpath(os.path.join(base_dir, config[key]))
+        # Извлечение текста
+        text = extractor.extract_text(str(input_pdf))
         
-        # Проверка путей
-        if not os.path.exists(config['input']):
-            raise FileNotFoundError(f"Файл постановления не найден: {config['input']}")
-        
-        # Анализ документа
-        logger.info("Анализ постановления...")
-        items = parser.parse_regulation(config['input'])
-        
-        if items:
-            logger.info(f"Найдено записей: {len(items)}")
+        if text:
+            # Сохранение результата
+            with open(output_txt, 'w', encoding='utf-8') as f:
+                f.write(text)
             
-            # Сохранение результатов
-            parser.save_to_excel(items, config['output'])
+            extractor.logger.info(f"Текст сохранен в: {output_txt}")
             
-            # Вывод примеров
-            print("\nПримеры найденных записей:")
-            for item in items[:3]:
-                print(f"{item['Наименование товара, упаковки'][:50]}... | {item['Код единой Товарной номенклатуры внешнеэкономической деятельности Евразийского экономического союза(ТН ВЭД ЕАЭС)']}")
+            # Статистика
+            chars = len(text)
+            words = len(re.findall(r'\w+', text))
+            nums = len(re.findall(r'\d', text))
+            
+            extractor.logger.info(f"Статистика: {chars} симв., {words} слов, {nums} цифр")
+            
+            # Пример текста
+            sample = text[:500] + ('...' if len(text) > 500 else '')
+            extractor.logger.info(f"Пример текста:\n{sample}")
         else:
-            logger.warning("Не найдено данных в документе")
-        
+            extractor.logger.error("Не удалось извлечь текст")
+            
     except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
+        extractor.logger.error(f"Ошибка: {e}", exc_info=True)
 
 if __name__ == "__main__":
     main()
