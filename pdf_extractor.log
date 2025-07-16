@@ -1,14 +1,11 @@
-2025-07-11 22:37:45,853 - INFO - Tesseract настроен: C:\Program Files\Tesseract-OCR\tesseract.exe
-2025-07-11 22:37:45,880 - ERROR - Русский язык не найден в Tesseract. Установите rus.traineddata
-2025-07-11 22:37:45,881 - INFO - Скачайте rus.traineddata с: https://github.com/tesseract-ocr/tessdata
-2025-07-11 22:37:45,881 - INFO - И поместите в: C:\Program Files\Tesseract-OCR\tessdata
-2025-07-11 22:37:45,881 - INFO - Poppler настроен: C:\Program Files\poppler-24.08.0\Library\bin
-2025-07-11 22:37:45,883 - INFO - Начало обработки файла: C:\Users\Aleksandr\Downloads\Yandex-Cloud-Data-Recognition-Lab\2. scr\..\1. docs\Постановление Правительства Российской Федерации от 29.12.2023 № 2414 (с 2024 года).pdf
-2025-07-11 22:41:10,313 - INFO - Tesseract настроен: C:\Program Files\Tesseract-OCR\tesseract.exe
-2025-07-11 22:41:10,314 - INFO - Русский язык обнаружен в Tesseract
-2025-07-11 22:41:10,314 - INFO - Poppler настроен: C:\Program Files\poppler-24.08.0\Library\bin
-2025-07-11 23:00:13,861 - INFO - Метод _extract_with_ocr дал улучшение
-2025-07-11 23:00:14,104 - INFO - Текст сохранен в: C:\Users\Aleksandr\Downloads\Yandex-Cloud-Data-Recognition-Lab\2. scr\..\2. scr\output\extracted_text.txt
-2025-07-11 23:00:14,172 - INFO - Статистика: 722282 симв., 91992 слов, 37682 цифр
-2025-07-11 23:00:14,172 - INFO - Пример текста:
+2025-07-16 14:30:26,886 - INFO - Tesseract настроен: C:\Program Files\Tesseract-OCR\tesseract.exe
+2025-07-16 14:30:26,887 - INFO - Русский язык обнаружен в Tesseract
+2025-07-16 14:30:26,887 - INFO - Poppler настроен: C:\Program Files\poppler-24.08.0\Library\bin
+2025-07-16 14:49:08,175 - INFO - Метод _extract_with_ocr дал улучшение
+2025-07-16 14:49:08,353 - INFO - Текст сохранен в: C:\Users\Aleksandr\Downloads\Yandex-Cloud-Data-Recognition-Lab\2. scr\..\2. scr\output\extracted_text.txt
+2025-07-16 14:49:08,384 - INFO - Статистика: 722282 симв., 91992 слов, 37682 цифр
+2025-07-16 14:49:08,385 - INFO - Пример текста:
 ПРАВИТЕЛЬСТВО РОССИИСКОЙ ФЕДЕРАЦИИ ПОСТАНОВЛЕНИЕ от 29 декабря 2023 г. № 2414 МОСКВА  утверждении перечней товаров, упаковки, отходы от использования которых подлежат утилизации, и нормативов утилизации отходов от использования товаров, упаковки В соответствии  статьей 24?Федерального закона " отходах производства и потребления" и статьей 7 Федерального закона от 4 августа 2023 . № 451-ФЗ "О внесении изменений в Федеральный закон " отходах производства и потребления" и отдельные законодательные ...
+2025-07-16 14:50:13,728 - INFO - Tesseract настроен: C:\Program Files\Tesseract-OCR\tesseract.exe
+2025-07-16 14:50:13,729 - INFO - Русский язык обнаружен в Tesseract
+2025-07-16 14:50:13,729 - INFO - Poppler настроен: C:\Program Files\poppler-24.08.0\Library\bin
