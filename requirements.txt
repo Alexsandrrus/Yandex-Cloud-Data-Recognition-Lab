@@ -11,4 +11,5 @@ numpy
 pillow
 poppler-utils
 PyPDF2 
-pdfminer.six    
+pdfminer.six  
+fpdf  

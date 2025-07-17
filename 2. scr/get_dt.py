@@ -1,3 +1,4 @@
+
 import os
 import re
 import logging
@@ -10,13 +11,20 @@ import pdfplumber
 from pdf2image import convert_from_path
 import pytesseract
 from PIL import Image, ImageEnhance, ImageFilter
+from fpdf import FPDF
 
 class PDFDataExtractor:
     def __init__(self):
         self.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
         self.poppler_path = r'C:\Program Files\poppler-24.08.0\Library\bin'
+        # Путь к папке со шрифтами
+        self.font_dir = Path(__file__).parent / "djsans"
         self._setup_logging()
         self._setup_environment()
+
+        # Проверка существования папки со шрифтами
+        if not self.font_dir.exists():
+            self.logger.warning(f"Папка со шрифтами не найдена: {self.font_dir}")
 
     def _setup_logging(self):
         """Настройка системы логирования"""
@@ -45,7 +53,7 @@ class PDFDataExtractor:
             self.logger.warning(f"Poppler не найден по пути: {self.poppler_path}")
 
     def extract_data_from_folder(self, input_folder: str, output_folder: str):
-        """Извлечение данных из всех PDF в папке и сохранение в CSV"""
+        """Извлечение данных из всех PDF в папке и сохранение в CSV и PDF"""
         input_path = Path(input_folder).resolve()
         output_path = Path(output_folder).resolve()
         
@@ -66,6 +74,9 @@ class PDFDataExtractor:
                 'Вес нетто (кг)'
             ])
             
+            # Создаем список для данных PDF
+            data_rows = []
+            
             # Обработка каждого PDF файла
             for pdf_file in input_path.glob('*.pdf'):
                 try:
@@ -74,21 +85,142 @@ class PDFDataExtractor:
                     
                     if text:
                         data = self._parse_data(text, pdf_file.name)
-                        writer.writerow([
+                        row_data = [
                             pdf_file.name,
                             data.get('marking', 'Не найдено'),
                             data.get('code', 'Не найдено'),
                             data.get('gross_weight', 'Не найдено'),
                             data.get('net_weight', 'Не найдено')
-                        ])
+                        ]
+                        
+                        writer.writerow(row_data)
+                        data_rows.append(row_data)
                         self.logger.info(f"Данные извлечены из {pdf_file.name}")
                     else:
                         self.logger.warning(f"Не удалось извлечь текст из: {pdf_file.name}")
                         writer.writerow([pdf_file.name, 'Ошибка чтения', '', '', ''])
+                        data_rows.append([pdf_file.name, 'Ошибка чтения', '', '', ''])
                         
                 except Exception as e:
                     self.logger.error(f"Ошибка при обработке {pdf_file.name}: {str(e)}")
                     writer.writerow([pdf_file.name, 'Ошибка обработки', '', '', ''])
+                    data_rows.append([pdf_file.name, 'Ошибка обработки', '', '', ''])
+        
+        # Сохраняем в PDF
+        self._save_to_pdf(data_rows, output_file)
+        self.logger.info("Обработка завершена. Данные сохранены в CSV и PDF файлы.")
+
+    def _save_to_pdf(self, data_rows, output_csv_path):
+        """Сохраняет данные в PDF файл"""
+        pdf_path = output_csv_path.with_suffix('.pdf')
+        
+        try:
+            # Создаем PDF документ
+            pdf = FPDF()
+            pdf.add_page()
+            
+            # Пути к шрифтам
+            dejavu_path = self.font_dir / "DejaVuSansCondensed.ttf"
+            arial_path = self.font_dir / "arial.ttf"
+            
+            # Пробуем загрузить DejaVu
+            try:
+                if dejavu_path.exists():
+                    pdf.add_font('DejaVu', '', str(dejavu_path), uni=True)
+                    pdf.set_font('DejaVu', '', 10)
+                    self.logger.info("Используется шрифт DejaVu")
+                else:
+                    raise FileNotFoundError(f"DejaVu не найден по пути: {dejavu_path}")
+            except Exception as e:
+                self.logger.warning(f"Не удалось загрузить DejaVu: {str(e)}. Пробую Arial.")
+                if arial_path.exists():
+                    pdf.add_font('Arial', '', str(arial_path), uni=True)
+                    pdf.set_font('Arial', '', 10)
+                    self.logger.info("Используется шрифт Arial")
+                else:
+                    self.logger.warning("Arial также не найден. Использую стандартный шрифт (возможны проблемы с кириллицей).")
+                    pdf.set_font("Arial", size=10)  # Стандартный шрифт PDF (не поддерживает кириллицу)
+            
+            # Заголовок отчета
+            pdf.set_font_size(14)
+            pdf.cell(0, 10, "Отчет по извлеченным данным из PDF", 0, 1, 'C')
+            pdf.ln(10)
+            pdf.set_font_size(10)
+            
+            # Заголовки столбцов
+            headers = ['Файл', 'Маркировка и количество', 'Код товара', 'Вес брутто', 'Вес нетто']
+            col_widths = [30, 70, 25, 25, 25]
+            
+            # Добавляем заголовки
+            pdf.set_fill_color(200, 220, 255)
+            for i, header in enumerate(headers):
+                pdf.cell(col_widths[i], 10, header, border=1, fill=True)
+            pdf.ln()
+            
+            # Добавляем данные
+            pdf.set_fill_color(255, 255, 255)
+            for row in data_rows:
+                for i, value in enumerate(row):
+                    # Укорачиваем длинный текст маркировки
+                    if i == 1 and len(value) > 150:
+                        value = value[:150] + "..."
+                    pdf.cell(col_widths[i], 10, value, border=1)
+                pdf.ln()
+            
+            # Сохраняем PDF
+            pdf.output(str(pdf_path))
+            self.logger.info(f"PDF отчет сохранен: {pdf_path}")
+        except Exception as e:
+            self.logger.error(f"Ошибка при создании PDF: {str(e)}")
+
+    def _save_to_pdf(self, data_rows, output_csv_path):
+        """Сохраняет данные в PDF файл"""
+        pdf_path = output_csv_path.with_suffix('.pdf')
+        
+        try:
+            # Создаем PDF документ
+            pdf = FPDF()
+            pdf.add_page()
+            
+            # Добавляем шрифт с поддержкой кириллицы
+            try:
+                pdf.add_font('DejaVu', '', 'DejaVuSansCondensed.ttf', uni=True)
+                pdf.set_font('DejaVu', '', 10)
+            except:
+                pdf.add_font('Arial', '', 'arial.ttf', uni=True)
+                pdf.set_font('Arial', '', 10)
+            
+            # Заголовок отчета
+            pdf.set_font_size(14)
+            pdf.cell(0, 10, "Отчет по извлеченным данным из PDF", 0, 1, 'C')
+            pdf.ln(10)
+            pdf.set_font_size(10)
+            
+            # Заголовки столбцов
+            headers = ['Файл', 'Маркировка и количество', 'Код товара', 'Вес брутто', 'Вес нетто']
+            col_widths = [30, 70, 25, 25, 25]
+            
+            # Добавляем заголовки
+            pdf.set_fill_color(200, 220, 255)
+            for i, header in enumerate(headers):
+                pdf.cell(col_widths[i], 10, header, border=1, fill=True)
+            pdf.ln()
+            
+            # Добавляем данные
+            pdf.set_fill_color(255, 255, 255)
+            for row in data_rows:
+                for i, value in enumerate(row):
+                    # Укорачиваем длинный текст маркировки
+                    if i == 1 and len(value) > 150:
+                        value = value[:150] + "..."
+                    pdf.cell(col_widths[i], 10, value, border=1)
+                pdf.ln()
+            
+            # Сохраняем PDF
+            pdf.output(str(pdf_path))
+            self.logger.info(f"PDF отчет сохранен: {pdf_path}")
+        except Exception as e:
+            self.logger.error(f"Ошибка при создании PDF: {str(e)}")
 
     def extract_text(self, pdf_path: str) -> str:
         """Извлечение текста из PDF с приоритетом для OCR"""
@@ -127,27 +259,62 @@ class PDFDataExtractor:
             f.write(text)
         
         try:
-            # 1. Маркировка и количество
+            # 1. Маркировка и количество - УЛУЧШЕННЫЙ ПОИСК
             marking_patterns = [
-                r'31\s*Грузовые\s*места\s*и\s*описание\s*товаров\s*Маркировка и количество - Номера контейнеров - Количество и отличительные особенности\s*(.*?)\s*(?=\d{1,2}\s*Товар|\d{1,2}\s*Код|Вес|$)',
-                r'Маркировка и количество - Номера контейнеров - Количество и отличительные особенности\s*(.*?)\s*(?=\d{1,2}\s*Товар|\d{1,2}\s*Код|Вес|$)',
-                r'Описание\s*товаров\s*(.*?)\s*(?=\d{1,2}\s*Товар|\d{1,2}\s*Код|Вес|$)'
+                # Основной шаблон: захватываем содержимое после заголовка
+                r'(?:31\s*[^\n]*(?:Грузовые места|Описание товаров|Маркировка и количество)|'
+                r'Маркировка и количество[^\n]*|Описание товаров[^\n]*)\s*'
+                r'[:—\-\s]*\s*(.*?)\s*(?=\d{1,2}\s*Товар|\d{1,2}\s*Код|Вес|33\s|35\s|38\s|$)',
+                
+                # Шаблон для формата с нумерацией 1)
+                r'1[\)\.\-]\s*(.*?)\s*(?=\d{1,2}\s*Товар|\d{1,2}\s*Код|Вес|33\s|35\s|38\s|$)',
+                
+                # Альтернативные варианты начала описания
+                r'(?:Наименование товара|Описание):\s*(.*?)\s*(?=\d{1,2}\s*Товар|\d{1,2}\s*Код|Вес|$)',
+                
+                # Поиск по характерным фразам (более гибкий)
+                r'(?:Маркировка и количество[^\n]*|Описание товаров[^\n]*)\s*[\r\n]+(.*?)\s*(?=\d{1,2}\s*[^\n]*Код|Вес|$)',
+                
+                # Резервный шаблон: ищем любой текст после заголовка до цифровых разделов
+                r'(?:31|33|35|38)[^\n]*\s*[\r\n]+(.*?)\s*(?=\d{1,2}\s*[^\n]*(?:Товар|Код|Вес)|$)',
+                
+                # Новый шаблон для сложных случаев с финансовой информацией
+                r'11\d{1,2}\s*[^\n]*\s*(.*?)\s*(?=\d{1,2}\s*[^\n]*(?:Товар|Код|Вес|Счет|Вид|Место))'
             ]
             
+            # Расширенный поиск с обработкой многострочных описаний
             for pattern in marking_patterns:
                 marking_match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
                 if marking_match:
-                    marking_text = marking_match.group(1).strip()
+                    # Выбираем последнюю группу, где находится нужный текст
+                    groups = marking_match.groups()
+                    marking_text = groups[-1].strip() if groups else ""
                     
                     # Удаляем технические коды вида (796)
                     marking_text = re.sub(r'\(\d+\)', '', marking_text)
                     
-                    # Очистка текста
-                    marking_text = re.sub(r'\s+', ' ', marking_text)
-                    marking_text = re.sub(r'(\d)\s+(\d)', r'\1\2', marking_text)
+                    # Очистка текста - улучшенная обработка переносов
+                    marking_text = re.sub(r'-\s*\n', '', marking_text)  # Соединяем перенесенные слова
+                    marking_text = re.sub(r'\s+', ' ', marking_text)     # Убираем лишние пробелы
+                    marking_text = re.sub(r'(\d)\s+(\d)', r'\1\2', marking_text)  # Объединяем разделенные цифры
+                    
+                    # Удаляем возможные артефакты OCR
+                    marking_text = re.sub(r'[^\w\s\d.,;:()\-\/\n]', ' ', marking_text)
+                    
+                    # Удаляем оставшиеся фрагменты заголовков
+                    header_phrases = [
+                        'Грузовые места', 'Описание товаров', 
+                        'Маркировка и количество', 'Номера контейнеров',
+                        'Количество и отличительные особенности'
+                    ]
+                    for phrase in header_phrases:
+                        marking_text = re.sub(rf'\b{re.escape(phrase)}\b', '', marking_text, flags=re.IGNORECASE)
+                    
+                    marking_text = re.sub(r'\s+', ' ', marking_text).strip()
                     
                     if marking_text and len(marking_text) > 10:  # Проверка на минимальную значимую длину
                         data['marking'] = marking_text
+                        self.logger.info(f"Найдена маркировка по шаблону: {pattern[:50]}...")
                         break
             
             # 2. Код товара (ТН ВЭД)
@@ -201,7 +368,7 @@ class PDFDataExtractor:
         
         self.logger.info(f"Извлеченные данные для {filename}: {data}")
         return data
-
+        
     def _is_text_better(self, old: str, new: str) -> bool:
         """Сравнивает качество текста"""
         if not new:
@@ -350,7 +517,6 @@ def main():
         (base_dir / 'debug').mkdir(exist_ok=True)
         
         extractor.extract_data_from_folder(str(input_folder), str(output_folder))
-        extractor.logger.info("Обработка завершена. Данные сохранены в CSV файл.")
         
     except Exception as e:
         extractor.logger.error(f"Ошибка: {str(e)}", exc_info=True)
